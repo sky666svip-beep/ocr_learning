@@ -6,7 +6,6 @@ st.set_page_config(page_title="OCR Learning Platform", layout="wide")
 st.sidebar.title("🧭 导航矩阵")
 st.sidebar.markdown("探索端到端序列建模的进化历程")
 
-# 定义可用的演进版本
 pages = {
     "V1 经典切分架构 (传统CV + CNN)": "v1_traditional",
     "V2 端到端序列建模 (CRNN + CTC)": "v2_crnn_ctc",
