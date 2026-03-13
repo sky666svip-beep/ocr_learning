@@ -146,7 +146,60 @@
   - 开放了极度精细的 `学习率 (LR)` 步进器（支持小数位精度）、`训练轮次 (Epochs)` 滑动条（最大延展至 100 轮），以及 `Batch Size` 的即时调控。
   - 移除了散落各处的由于历史迭代遗留的硬编码默认值（重点包括 V5 的 epochs 25 写死），使整个沙箱形成彻底的模型演化闭环并完全自由化。
 
+### 性能优化：引入 Automatic Mixed Precision (AMP) 提升训练速度
+
+- **Status:** complete
+- **Started:** 2026-03-13 18:22
+- 采取的行动:
+  - 为了提升计算密集的 V4 (CNN+Transformer) 与 V5 (Vision Transformer) 在 Streamlit 侧边栏开启较长 Epochs 时的训练体验，针对这两个模型训练脚本引入了 `torch.cuda.amp` 半精度加速。
+  - 增加了 `enable_amp = torch.cuda.is_available()` 守卫逻辑（防止无 CUDA 卡系统报错）。
+  - 将所有 Loss (`CrossEntropyLoss`, `CTCLoss`) 的计算以及 logits 输出显式退出 `autocast`，并强制转为 `float32`，防止在半精度下 Loss 计算产生 NaN 下溢。
+- 修改的文件:
+  - train_v4_joint.py (updated)
+  - train_v5_vit.py (updated)
+  - task_plan.md (updated)
+
+### V1 极度防御强化：倾斜校正、启发式强切与自适应阈值
+
+- **Status:** complete
+- **Started:** 2026-03-13 18:32
+- 采取的行动:
+  - **影响范围全局化**: 在 `utils/image_processing.py` 的 `unified_enhance_image` 前置拦截器中实装了基于 `HoughLinesP` 与边缘检测的倾斜角探测算法。对角度超过 0.5 度的图像执行仿射变换 (`warpAffine`) 展平，背景填充为纯白(`255`)防污染。此增强红利下放到 V1-V5 全系模型。
+  - **垂直切割防御体系**: 在 `utils/image_processing.py` 的 `process_image` 流程中实装了启发式寻找垂直凹陷路径（Water Drop Heuristic）来对抗宽胖的严重粘连字符；实装了依靠高斯邻域运算的 `cv2.adaptiveThreshold`，彻底防范阴影照片的 Otsu 全局阈值一刀切。
+  - **特色教学调参 UI**: 重构 `pages/v1_traditional.py`，在侧边栏新增“🛡️ 防御阵地调参”区块，支持 Toggle 防线开关并对自适应阈值的 `Block Size` 和 `C` 开放精确微调。
+  - **过程解剖全景展示**: 新增「📐 霍夫倾斜校正」、「🌓 自适应阈值与形态学」、「滴水启发式强切」三大崭新动态 Expander，并且能够可视化还原“红线斩断痕迹”，直击痛点。
+- 修改的文件:
+  - utils/image_processing.py (updated)
+  - pages/v1_traditional.py (updated)
+  - task_plan.md (updated)
+
 ## 测试结果
+
+### V2-V5 序列模型前端切割与 STN 形变防御
+
+- **Status:** complete
+- **Started:** 2026-03-13 18:38
+- 采取的行动:
+  - **组件增加提取函数 (`utils/image_processing.py:extract_text_lines`)**: 将图像基于轮廓体积过滤（代替脆弱的 findNonZero）以及高密度掩码上的行投影寻谷探测（Horizontal Projection），实现了对多行段落图像的安全切图，完美剥离小噪点，并按自然行剥离为一维数组供给前端推断。
+  - **加入独立的空间特征微调网络 (`SpatialTransformerNetwork`)**: 基于原生 PyTorch 的 `grid_sample` 实现轻量化的自适应放射变形校正网。此网嵌入至 `V4JointModel` 的骨干 CNN 前。为遵循平滑过渡思想，其为可选节点 `use_stn`。
+  - **升级 V4 UI 交互面板**: 左侧栏目现在能直接让用户勾选激活 `STN 组件` 联合编译。当检测到图片输出多行文本分段时，动态渲染出水平选择电台（Radio Button），允许用户细致挑选要通过联合 Attention 解码的单独一句话。
+- 修改的文件:
+  - utils/image_processing.py (updated)
+  - models/v4_transformer_joint.py (updated)
+  - train_v4_joint.py (updated)
+  - pages/v4_transformer_joint.py (updated)
+  - task_plan.md (updated)
+
+### V1-V5 架构防御演进总结文档
+
+- **Status:** complete
+- **Started:** 2026-03-13 18:44
+- 采取的行动:
+  - 在 `docs/` 目录下按照 Manus-style 规范生成了架构演进复盘记录 `v1_v5_robustness_architecture_review.md`。
+  - 文档详细涵盖了倾斜校正的全系影响，V1 的自适应阈值和盲切机制，以及 V2-V5 序列模型中引入的多行感知、最强连通域滤波和 V4 中的独立微型 STN 训练选项。
+- 修改的文件:
+  - docs/v1_v5_robustness_architecture_review.md (created)
+  - progress.md (updated)
 
 | 测试               | 输入                   | 预期                    | 实际          | 状态 |
 | ------------------ | ---------------------- | ----------------------- | ------------- | ---- |

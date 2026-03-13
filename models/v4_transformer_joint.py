@@ -46,6 +46,49 @@ class PositionalEncoding(nn.Module):
         x = x + self.pe[:x.size(0), :]
         return x
 
+class SpatialTransformerNetwork(nn.Module):
+    """
+    STN: 学习仿射变换矩阵，对扭曲、透视变形的输入图像进行校正。
+    """
+    def __init__(self):
+        super(SpatialTransformerNetwork, self).__init__()
+        
+        # Spatial transformer localization-network
+        self.localization = nn.Sequential(
+            nn.Conv2d(1, 8, kernel_size=7),
+            nn.MaxPool2d(2, stride=2),
+            nn.ReLU(True),
+            nn.Conv2d(8, 10, kernel_size=5),
+            nn.MaxPool2d(2, stride=2),
+            nn.ReLU(True)
+        )
+        
+        # Regressor for the 3 * 2 affine matrix
+        self.fc_loc = nn.Sequential(
+            nn.Linear(10 * 4 * 60, 32), # 假设输入是 32x256，经过两次 pool 大约是这个尺寸
+            nn.ReLU(True),
+            nn.Linear(32, 3 * 2)
+        )
+        
+        # Initialize the weights/bias with identity transformation
+        self.fc_loc[2].weight.data.zero_()
+        self.fc_loc[2].bias.data.copy_(torch.tensor([1, 0, 0, 0, 1, 0], dtype=torch.float))
+
+    def forward(self, x):
+        xs = self.localization(x)
+        xs = xs.view(-1, 10 * xs.shape[2] * xs.shape[3]) # 动态适应尺寸
+        # 如果尺寸不对，我们退回恒等变换
+        if xs.shape[1] != self.fc_loc[0].in_features:
+            theta = torch.tensor([1, 0, 0, 0, 1, 0], dtype=torch.float, device=x.device).view(-1, 2, 3)
+            theta = theta.repeat(x.size(0), 1, 1)
+        else:
+            theta = self.fc_loc(xs)
+            theta = theta.view(-1, 2, 3)
+
+        grid = torch.nn.functional.affine_grid(theta, x.size(), align_corners=True)
+        x = torch.nn.functional.grid_sample(x, grid, align_corners=True)
+        return x
+
 class AttentionDecoder(nn.Module):
     """
     沿用/微调 V3 的 RNN Attention Decoder。平滑承接 Transformer Encoder的输出。
@@ -150,8 +193,12 @@ class TransformerEncoderHooked(nn.Module):
         return output
 
 class V4JointModel(nn.Module):
-    def __init__(self, output_dim_attn, output_dim_ctc, d_model=64, nhead=2, num_layers=1, dec_hid_dim=128):
+    def __init__(self, output_dim_attn, output_dim_ctc, d_model=64, nhead=2, num_layers=1, dec_hid_dim=128, use_stn=False):
         super(V4JointModel, self).__init__()
+        self.use_stn = use_stn
+        if self.use_stn:
+            self.stn = SpatialTransformerNetwork()
+            
         self.cnn = EncoderCNN()
         
         # 空间平展后映射到 d_model
@@ -185,6 +232,8 @@ class V4JointModel(nn.Module):
 
     def get_ctc_output(self, x):
         """仅做推理，获取 CTC 对齐图"""
+        if self.use_stn:
+            x = self.stn(x)
         # CNN (B, 1, 32, 256) -> (B, 64, 4, 32)
         conv_out = self.cnn(x)
         B, C, H, W = conv_out.shape
@@ -210,6 +259,8 @@ class V4JointModel(nn.Module):
         x: (B, 1, 32, 256)
         trg: (B, L) Seq2Seq target sequence, if none means inference mode
         """
+        if self.use_stn:
+            x = self.stn(x)
         # 1. CNN Feature Extraction
         conv_out = self.cnn(x) # (B, 64, 4, 32)
         B, C, H, W = conv_out.shape

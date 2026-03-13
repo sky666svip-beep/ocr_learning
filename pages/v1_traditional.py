@@ -101,23 +101,59 @@ def render_v1_ui():
     if uploaded_file is not None:
         image_pil = Image.open(uploaded_file)
         
+        # --- 防御体系调参面板 ---
+        st.sidebar.markdown("---")
+        st.sidebar.header("🛡️ 防御阵地调参")
+        use_skew_correction = st.sidebar.checkbox("📐 开启倾斜校正 (Skew Correction)", value=True, help="全局级：使用霍夫变换矫正用户拍摄倾斜")
+        
+        use_adaptive_thresh = st.sidebar.checkbox("🌓 开启自适应阈值 (Adaptive Thresholding)", value=False, help="局部级：应对严重光照不均和阴阳脸")
+        block_size = 11
+        c_val = 2
+        if use_adaptive_thresh:
+            block_size = st.sidebar.slider("区块大小 (Block Size)", min_value=3, max_value=51, step=2, value=11)
+            c_val = st.sidebar.slider("补偿值 (C)", min_value=-10, max_value=20, step=1, value=2)
+            
+        use_heuristic_split = st.sidebar.checkbox("💧 开启启发式强切 (Water Drop Heuristic)", value=False, help="局部级：应对字符严重粘连导致垂直投影失效")
+
         # --- 注入 V1-V5 统一图片清洗增强防线 ---
         from utils.image_processing import unified_enhance_image
-        image_pil = unified_enhance_image(image_pil)
+        enhance_result = unified_enhance_image(image_pil, apply_skew_correction=use_skew_correction)
+        image_pil_enhanced = enhance_result['image']
+        skew_angle = enhance_result['skew_angle']
+        debug_img_before = enhance_result['debug_img_before_skew']
+        debug_img_after = enhance_result['debug_img_after_skew']
         
         col_left, col_right = st.columns([1, 1])
         
         with col_left:
-            st.subheader("🛠️ 过程解剖 (切分依据)")
-            gray_img, binary_img, projection, bboxes = process_image(image_pil)
+            st.subheader("🛠️ 过程解剖 (防御与切分)")
+            gray_img, binary_img, projection, bboxes, heuristic_lines = process_image(
+                image_pil_enhanced, 
+                use_adaptive_thresh=use_adaptive_thresh, 
+                block_size=block_size, 
+                C=c_val, 
+                use_heuristic_split=use_heuristic_split
+            )
             
-            with st.expander("1. 灰度化图像", expanded=False):
-                st.image(gray_img, caption="丢弃色彩", use_container_width=True)
+            with st.expander("📐 霍夫倾斜校正 (Skew Correction)", expanded=use_skew_correction):
+                if use_skew_correction and abs(skew_angle) > 0.5:
+                    st.success(f"检测到倾斜角: **{skew_angle:.2f}°**，已自动展平。")
+                    col_s1, col_s2 = st.columns(2)
+                    col_s1.image(debug_img_before, caption="原始输入 (旋转前)", use_container_width=True)
+                    col_s2.image(debug_img_after, caption="仿射变换 (展平后)", use_container_width=True)
+                elif use_skew_correction:
+                    st.info(f"图像端正 (倾斜角 {skew_angle:.2f}°) 无需校正。")
+                else:
+                    st.warning("倾斜校正防线已关闭。")
+            
+            with st.expander("🌓 自适应阈值与形态学 (Adaptive Thresholding)", expanded=False):
+                if use_adaptive_thresh:
+                    st.info(f"启用了 Adaptive Thresholding (Block:{block_size}, C:{c_val})")
+                else:
+                    st.info("启用了全局 Otsu 二值化")
+                st.image(binary_img, caption="信号提取图 (对抗阴阳脸与断裂)", use_container_width=True)
                 
-            with st.expander("2. Otsu 二值化 + 形态学处理", expanded=False):
-                st.image(binary_img, caption="信号变为白色亮度", use_container_width=True)
-                
-            with st.expander("3. 垂直投影柱状图 (切割核心)", expanded=True):
+            with st.expander("📊 垂直投影柱状图 (切割依据)", expanded=True):
                 fig, ax = plt.subplots(figsize=(8, 3))
                 ax.plot(projection, color='black')
                 ax.fill_between(range(len(projection)), projection, alpha=0.3)
@@ -128,19 +164,34 @@ def render_v1_ui():
                     ax.axvline(x=b[2], color='red', linestyle='--', alpha=0.5)
                 st.pyplot(fig)
 
-            with st.expander("4. 提取的单点序列切片", expanded=True):
+            with st.expander("💧 启发式强切 (Heuristic Splitting)", expanded=use_heuristic_split):
+                if use_heuristic_split:
+                    if len(heuristic_lines) > 0:
+                        st.warning(f"检测到严重粘连！触发了 **{len(heuristic_lines)}** 处强制水痕斩断。")
+                        # 将灰度图转回 RGB 画红线展示
+                        display_cut = cv2.cvtColor(gray_img, cv2.COLOR_GRAY2RGB)
+                        for line in heuristic_lines:
+                            x_cut, y_start, y_end = line
+                            cv2.line(display_cut, (x_cut, y_start), (x_cut, y_end), (255, 0, 0), 2)
+                        st.image(display_cut, caption="红线标记启发式斩断点", use_container_width=True)
+                    else:
+                        st.success("字符间距良好，投影切分法完美胜任，未触发启发式强切。")
+                else:
+                    st.warning("如果数字粘连，识别将产生严重幻觉。请开启防线尝试挽救。")
+
+            with st.expander("🧩 提取的单点序列切片", expanded=True):
                 patches = extract_character_patches(gray_img, bboxes)
                 if patches:
                     cols = st.columns(len(patches))
                     for i, patch in enumerate(patches):
-                        cols[i].image(patch, caption=f"P{i}", width=40)
+                        cols[i%len(cols)].image(patch, caption=f"P{i}", width=40)
                 else:
                     st.error("没有检测到有效切割区域！")
 
         with col_right:
             st.subheader("🎯 推理结果")
             if patches:
-                img_with_boxes = image_pil.copy()
+                img_with_boxes = image_pil_enhanced.copy()
                 draw = ImageDraw.Draw(img_with_boxes)
                 transform = get_transform()
                 predictions = []

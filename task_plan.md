@@ -69,6 +69,27 @@
 - [x] 开发 `pages/v4_transformer_joint.py` 实现自注意力与双端对齐可视化
 - **Status:** complete
 
+### 阶段 9: 引入 torch.cuda.amp 提升侧边栏训练性能 (Phase 9: AMP Optimization)
+
+- [x] 在 `train_v4_joint.py` 中引入带有守卫逻辑的 AMP (仅限计算密集部分，显式退出 Loss 计算)
+- [x] 在 `train_v5_vit.py` 中引入带有守卫逻辑的 AMP (仅限计算密集部分，显式退出 Loss 计算)
+- **Status:** complete
+
+### 阶段 10: V1 极度防御强化 (Phase 10: V1 Robustness Enhancements)
+
+- [x] 在 `utils/image_processing.py` 的 `unified_enhance_image` 中引入 Hough Transform 倾斜校正 (返回校正图与角度供 UI 展示)
+- [x] 在 `utils/image_processing.py` 的 `process_image` 中引入自适应阈值 (Adaptive Thresholding) 及启发式滴水强切算法
+- [x] 在 `pages/v1_traditional.py` 中新增侧边栏调参及 4 大折叠面板全景展示
+- **Status:** complete
+
+### 阶段 11: 序列模型工业化增强 (Phase 11: V2-V5 Pipeline Upgrades)
+
+- [x] 修改 `utils/image_processing.py`：用 `cv2.findContours` 提取最大连通域 BBox 替代脆弱的 `findNonZero`。
+- [x] 修改 `utils/image_processing.py`：添加基于水平投影的多行文本切割（返回 Strips 数组）。
+- [x] 修改 `models/v4_transformer_joint.py`：以平滑过渡方式引入 `SpatialTransformerNetwork`(STN)，通过参数 `use_stn=True` 开启。
+- [x] 改造 `train_v4_joint.py` 及 UI：支持独立保存/加载 `best_v4_stn_joint.pth`，支持 UI 对多行文本选择渲染。
+- **Status:** complete
+
 ## 关键问题
 
 1. [等待 Socratic Gate 用户反馈]

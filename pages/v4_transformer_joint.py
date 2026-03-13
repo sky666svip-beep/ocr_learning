@@ -35,6 +35,7 @@ def render_v4_ui():
     
     st.sidebar.markdown("---")
     st.sidebar.markdown("🧠 **混合架构剖析 (沙盒动态调参) ⚠️**")
+    use_stn = st.sidebar.checkbox("📐 启用前置 STN (Spatial Transformer Network)", value=False, help="让网络自己学习如何对扭曲、透视变形的文本区域进行几何拉伸和矫正。开启后需重新训练独立模型权重。")
     lambda_ctc = st.sidebar.slider("⚖️ CTC Loss 权重比例 (0~1)", min_value=0.0, max_value=1.0, value=0.2, step=0.1, key="v4_lam", help="1.0 = 纯 CTC (绝对硬对齐但无语境)；  0.0 = 纯 Attention (容易视线漂移出错)。  默认为 0.2，让主路学习语言逻辑，让 CTC 在一旁当纠错保底。")
     num_layers = st.sidebar.slider("🧱 Transformer 层数", min_value=1, max_value=3, value=1, key="v4_nl", help="对于 32x256 的简单特征序列，1 层足以交流。更深的层数反而容易造成全局注意力稀释化并退化为噪声。")
     nhead = st.sidebar.selectbox("🎯 Multi-head Attention 头数", [1, 2, 4], index=1, key="v4_nh", help="决定了网络有多几个不同维度的观察视角。")
@@ -65,28 +66,33 @@ def render_v4_ui():
             chart_placeholder.pyplot(fig)
             plt.close(fig)
 
+        stn_suffix = "_stn" if use_stn else ""
+        save_path = f"models/best_v4{stn_suffix}_joint.pth"
+        
         best_loss = train_v4_joint_model(
             epochs=train_epochs,
             batch_size=batch_size,
             learning_rate=learning_rate,
-            save_path="models/best_v4_joint.pth",
+            save_path=save_path,
             progress_callback=update_progress,
             metric_callback=update_metrics,
             lambda_ctc=lambda_ctc,
             nhead=nhead,
-            num_layers=num_layers
+            num_layers=num_layers,
+            use_stn=use_stn
         )
         
         st.sidebar.success(f"V4 联合训练完成！最佳 Loss: {best_loss:.4f}")
         st.cache_resource.clear()
 
     # --- 核心推理与双面真理对比 UI ---
-    MODEL_PATH = "models/best_v4_joint.pth"
+    stn_suffix = "_stn" if use_stn else ""
+    MODEL_PATH = f"models/best_v4{stn_suffix}_joint.pth"
     
     @st.cache_resource
-    def load_v4_model(nl, nh):
+    def load_v4_model(nl, nh, stn_enabled):
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        model = V4JointModel(output_dim_attn=VOCAB_SIZE_ATTN, output_dim_ctc=VOCAB_SIZE_CTC, nhead=nh, num_layers=nl)
+        model = V4JointModel(output_dim_attn=VOCAB_SIZE_ATTN, output_dim_ctc=VOCAB_SIZE_CTC, nhead=nh, num_layers=nl, use_stn=stn_enabled)
         if os.path.exists(MODEL_PATH):
             try:
                 model.load_state_dict(torch.load(MODEL_PATH, map_location=device, weights_only=True))
@@ -106,34 +112,42 @@ def render_v4_ui():
             transforms.Normalize((0.5,), (0.5,))
         ])
 
-    model, device = load_v4_model(num_layers, nhead)
+    model, device = load_v4_model(num_layers, nhead, use_stn)
     if model is None:
-        st.warning(f"缺失 V4 权重 `{MODEL_PATH}`，请先在侧边栏点击进行验证训练。")
+        st.warning(f"缺失 V4 权重 `{MODEL_PATH}`，请先在侧边栏点击进行验证训练。{' (因开启了 STN，需独立训练)' if use_stn else ''}")
         st.stop()
         
-    uploaded_file = st.file_uploader("请上传数字与字母混合图 (如被拉伸/加长/大量背景空白，将绝佳地展现 CTC 如何压制漂移)", type=["png", "jpg", "jpeg"], key="v4_file")
+    uploaded_file = st.file_uploader("请上传数字与字母混合图 (如被拉伸/加长/大量背景空白/多行文本，将绝佳地展现 CTC 如何压制漂移)", type=["png", "jpg", "jpeg"], key="v4_file")
 
     if uploaded_file is not None:
         image_pil = Image.open(uploaded_file).convert('L')
         
-        from utils.image_processing import unified_enhance_image
-        image_pil = unified_enhance_image(image_pil)
+        from utils.image_processing import unified_enhance_image, extract_text_lines
+        enhanced_res = unified_enhance_image(image_pil)
+        enhanced_img = enhanced_res['image']
         
-        img_np = np.array(image_pil)
-        coords = cv2.findNonZero(255 - img_np)
-        if coords is not None:
-            x, y, w, h = cv2.boundingRect(coords)
-            margin = 5
-            x_s, y_s = max(0, x-margin), max(0, y-margin)
-            x_e, y_e = min(img_np.shape[1], x+w+margin), min(img_np.shape[0], y+h+margin)
-            image_pil = image_pil.crop((x_s, y_s, x_e, y_e))
+        # 多行文本水平切割
+        text_lines = extract_text_lines(enhanced_img)
+        
+        if len(text_lines) > 1:
+            st.info(f"检测到多行文本，已切分为 {len(text_lines)} 个单行片段 (Line Segmentation)。")
             
-        orig_w, orig_h = image_pil.size
-        # V4 / V2 固定宽度 256
+        # UI: 让用户选择哪一行来深入剖析注意力矩阵
+        selected_idx = 0
+        if len(text_lines) > 1:
+            cols = st.columns(len(text_lines))
+            for i, line_img in enumerate(text_lines):
+                cols[i].image(line_img, caption=f"行 {i+1}", use_container_width=True)
+            selected_idx = st.radio("选择要分析的行：", range(len(text_lines)), format_func=lambda x: f"行 {x+1}", horizontal=True)
+            
+        target_line_pil = text_lines[selected_idx]
+            
+        orig_w, orig_h = target_line_pil.size
+        # V4 / V2 固定高度 32, 宽度最长 256
         new_w = int(orig_w * (32 / max(orig_h, 1)))
         if new_w > 256: new_w = 256
             
-        scaled_img = image_pil.resize((new_w, 32), Image.Resampling.LANCZOS)
+        scaled_img = target_line_pil.resize((new_w, 32), Image.Resampling.LANCZOS)
         
         canv = Image.new('L', (256, 32), color=255)
         paste_x = min(5, 256 - new_w)

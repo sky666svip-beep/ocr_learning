@@ -71,6 +71,8 @@ def train_v5_vit_model(epochs=10, batch_size=32, learning_rate=0.001,
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn_v5)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    enable_amp = torch.cuda.is_available()
+    scaler = torch.cuda.amp.GradScaler(enabled=enable_amp)
 
     model = V5ViTOCR(
         vocab_size=VOCAB_SIZE, d_model=64,
@@ -102,17 +104,21 @@ def train_v5_vit_model(epochs=10, batch_size=32, learning_rate=0.001,
 
             # Teacher Forcing 混合：按概率使用 Ground Truth 或模型预测
             import random
-            if random.random() < tf_ratio:
-                logits = model(images, dec_input)
-            else:
-                # 自回归前向（逐步生成）
-                logits = model(images, dec_input)
+            with torch.cuda.amp.autocast(enabled=enable_amp):
+                if random.random() < tf_ratio:
+                    logits = model(images, dec_input)
+                else:
+                    # 自回归前向（逐步生成）
+                    logits = model(images, dec_input)
 
+            # 显式退出 autocast (转为 float32)
+            logits = logits.float()
             loss = criterion(logits.reshape(-1, VOCAB_SIZE), expected.reshape(-1))
 
             optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
 
             running_loss += loss.item()
             current_step += 1
@@ -131,7 +137,11 @@ def train_v5_vit_model(epochs=10, batch_size=32, learning_rate=0.001,
                 targets = targets.to(device)
                 dec_input = targets[:, :-1]
                 expected = targets[:, 1:]
-                logits = model(images, dec_input)
+                with torch.cuda.amp.autocast(enabled=enable_amp):
+                    logits = model(images, dec_input)
+                
+                # 显式退出 autocast (转为 float32)
+                logits = logits.float()
                 loss = criterion(logits.reshape(-1, VOCAB_SIZE), expected.reshape(-1))
                 val_loss += loss.item()
 
